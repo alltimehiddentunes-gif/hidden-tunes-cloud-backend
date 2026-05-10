@@ -90,6 +90,7 @@ router.post(
 
       const artistSlug = slugify(artist) || "unknown-artist";
       const albumSlug = makeUniqueSlug(`${artist}-${album}`, id);
+      const songSlug = makeUniqueSlug(`${artist}-${title}`, id);
 
       let duration = Number(req.body.duration || 0);
 
@@ -198,6 +199,7 @@ router.post(
         .from("songs")
         .insert({
           id,
+          slug: songSlug,
           title,
           artist,
           artist_id: artistId,
