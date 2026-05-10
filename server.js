@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import ytdlp from "yt-dlp-exec";
+import { createClient } from "@supabase/supabase-js";
 
 import songsRouter from "./routes/songs.js";
 import adminUploadRoutes from "./routes/adminUpload.js";
@@ -10,6 +11,11 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+
+const supabaseAdmin = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 app.use(cors());
 app.use(express.json({ limit: "25mb" }));
@@ -221,6 +227,7 @@ app.get("/", (req, res) => {
     routes: [
       "/api/health",
       "/api/songs",
+      "/api/songs/:id/lyrics",
       "/admin/upload/song",
       "/api/youtube/search?q=burna",
       "/api/youtube/trending",
@@ -237,6 +244,60 @@ app.get("/api/health", (req, res) => {
     status: "connected",
     service: "Hidden Tunes backend",
   });
+});
+
+app.get("/api/songs/:id/lyrics", async (req, res) => {
+  try {
+    const songId = String(req.params.id || "").trim();
+
+    if (!songId) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing song id.",
+      });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from("track_lyrics")
+      .select("*")
+      .eq("song_id", songId)
+      .maybeSingle();
+
+    if (error) {
+      throw error;
+    }
+
+    if (!data) {
+      return res.status(404).json({
+        success: false,
+        error: "No lyrics found.",
+        songId,
+      });
+    }
+
+    return res.json({
+      success: true,
+      songId: data.song_id,
+      lyrics_type: data.lyrics_type,
+      lyricsType: data.lyrics_type,
+      synced_lrc: data.synced_lrc,
+      syncedLrc: data.synced_lrc,
+      lrc: data.synced_lrc,
+      plain_lyrics: data.plain_lyrics,
+      plainLyrics: data.plain_lyrics,
+      lyrics: data.plain_lyrics,
+      lyrics_url: data.lyrics_url,
+      lyricsUrl: data.lyrics_url,
+      source: data.source,
+    });
+  } catch (error) {
+    console.error("Lyrics fetch failed:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: error?.message || "Lyrics fetch failed.",
+    });
+  }
 });
 
 app.get("/api/youtube/search", async (req, res) => {
