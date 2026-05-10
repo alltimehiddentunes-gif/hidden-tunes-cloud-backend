@@ -3,7 +3,6 @@ import cors from "cors";
 import dotenv from "dotenv";
 import ytdlp from "yt-dlp-exec";
 
-import { supabase } from "./services/supabase.js";
 import songsRouter from "./routes/songs.js";
 import adminUploadRoutes from "./routes/adminUpload.js";
 
@@ -13,7 +12,7 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "25mb" }));
 
 app.use("/api/songs", songsRouter);
 app.use("/admin/upload", adminUploadRoutes);
@@ -29,49 +28,29 @@ const HIDDEN_TUNES_CHANNEL_URL =
 
 function extractYouTubeId(value) {
   const text = String(value || "").trim();
-
   if (!text) return "";
 
-  if (/^[a-zA-Z0-9_-]{11}$/.test(text)) {
-    return text;
-  }
+  if (/^[a-zA-Z0-9_-]{11}$/.test(text)) return text;
 
   try {
     const url = new URL(text);
-
     const watchId = url.searchParams.get("v");
 
-    if (watchId && /^[a-zA-Z0-9_-]{11}$/.test(watchId)) {
-      return watchId;
-    }
+    if (watchId && /^[a-zA-Z0-9_-]{11}$/.test(watchId)) return watchId;
 
-    const shortsMatch = url.pathname.match(
-      /\/shorts\/([a-zA-Z0-9_-]{11})/
-    );
+    const shortsMatch = url.pathname.match(/\/shorts\/([a-zA-Z0-9_-]{11})/);
+    if (shortsMatch?.[1]) return shortsMatch[1];
 
-    if (shortsMatch?.[1]) {
-      return shortsMatch[1];
-    }
-
-    const embedMatch = url.pathname.match(
-      /\/embed\/([a-zA-Z0-9_-]{11})/
-    );
-
-    if (embedMatch?.[1]) {
-      return embedMatch[1];
-    }
+    const embedMatch = url.pathname.match(/\/embed\/([a-zA-Z0-9_-]{11})/);
+    if (embedMatch?.[1]) return embedMatch[1];
 
     if (url.hostname.includes("youtu.be")) {
       const id = url.pathname.replace("/", "").trim();
-
-      if (/^[a-zA-Z0-9_-]{11}$/.test(id)) {
-        return id;
-      }
+      if (/^[a-zA-Z0-9_-]{11}$/.test(id)) return id;
     }
   } catch {}
 
   const match = text.match(/[a-zA-Z0-9_-]{11}/);
-
   return match ? match[0] : "";
 }
 
@@ -88,26 +67,17 @@ function normalizeYouTubeItem(item) {
   if (!item) return null;
 
   const id = extractYouTubeId(
-    item.id ||
-      item.videoId ||
-      item.url ||
-      item.webpage_url ||
-      item.original_url
+    item.id || item.videoId || item.url || item.webpage_url || item.original_url
   );
 
   if (!id) return null;
 
   const title = String(item.title || "Unknown Title").trim();
-
   if (!title) return null;
 
-  if (title.toLowerCase().includes("deleted video")) {
-    return null;
-  }
-
-  if (title.toLowerCase().includes("private video")) {
-    return null;
-  }
+  const lowerTitle = title.toLowerCase();
+  if (lowerTitle.includes("deleted video")) return null;
+  if (lowerTitle.includes("private video")) return null;
 
   const artist =
     item.artist ||
@@ -146,20 +116,14 @@ function dedupeTracks(tracks) {
 
   return tracks.filter((track) => {
     if (!track?.videoId) return false;
-
-    if (seen.has(track.videoId)) {
-      return false;
-    }
-
+    if (seen.has(track.videoId)) return false;
     seen.add(track.videoId);
-
     return true;
   });
 }
 
 async function fetchHiddenTunesRss(limit = 20) {
   const safeLimit = Math.min(Number(limit || 20), 20);
-
   const feedUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${HIDDEN_TUNES_CHANNEL_ID}`;
 
   const response = await fetch(feedUrl);
@@ -169,22 +133,14 @@ async function fetchHiddenTunesRss(limit = 20) {
   }
 
   const xml = await response.text();
-
-  const entries =
-    xml.match(/<entry>[\s\S]*?<\/entry>/g) || [];
+  const entries = xml.match(/<entry>[\s\S]*?<\/entry>/g) || [];
 
   const tracks = entries
     .map((entry) => {
-      const videoId =
-        entry.match(/<yt:videoId>(.*?)<\/yt:videoId>/)?.[1] || "";
-
-      const title = decodeXml(
-        entry.match(/<title>(.*?)<\/title>/)?.[1] || ""
-      );
-
+      const videoId = entry.match(/<yt:videoId>(.*?)<\/yt:videoId>/)?.[1] || "";
+      const title = decodeXml(entry.match(/<title>(.*?)<\/title>/)?.[1] || "");
       const channelTitle = decodeXml(
-        entry.match(/<name>(.*?)<\/name>/)?.[1] ||
-          "Hidden Tunes"
+        entry.match(/<name>(.*?)<\/name>/)?.[1] || "Hidden Tunes"
       );
 
       return normalizeYouTubeItem({
@@ -207,25 +163,54 @@ async function fetchHiddenTunesRss(limit = 20) {
   };
 }
 
-async function searchYouTube(query, limit = 20) {
+async function searchYouTubeSafe(query, limit = 20) {
   const safeLimit = Math.min(Number(limit || 20), 20);
 
-  const result = await ytdlp(
-    `ytsearch${safeLimit}:${query}`,
-    {
+  try {
+    const result = await ytdlp(`ytsearch${safeLimit}:${query}`, {
       dumpSingleJson: true,
       skipDownload: true,
       noWarnings: true,
       noPlaylist: true,
       flatPlaylist: false,
-    }
-  );
+    });
 
-  const tracks = (result?.entries || [])
-    .map(normalizeYouTubeItem)
-    .filter(Boolean);
+    const tracks = (result?.entries || [])
+      .map(normalizeYouTubeItem)
+      .filter(Boolean);
 
-  return dedupeTracks(tracks);
+    return dedupeTracks(tracks);
+  } catch (error) {
+    console.log("yt-dlp blocked or failed. Using fallback.", error.message);
+    return [];
+  }
+}
+
+async function getM4aUrl(videoId) {
+  const safeVideoId = extractYouTubeId(videoId);
+
+  if (!safeVideoId) {
+    throw new Error("Missing or invalid YouTube video ID");
+  }
+
+  if (streamCache.has(safeVideoId)) {
+    return streamCache.get(safeVideoId);
+  }
+
+  const videoUrl = `https://www.youtube.com/watch?v=${safeVideoId}`;
+
+  const rawUrl = await ytdlp(videoUrl, {
+    getUrl: true,
+    noWarnings: true,
+    noPlaylist: true,
+    format: "140/bestaudio[ext=m4a]/bestaudio",
+  });
+
+  const streamUrl = String(rawUrl || "").split("\n")[0].trim();
+
+  streamCache.set(safeVideoId, streamUrl);
+
+  return streamUrl;
 }
 
 app.get("/", (req, res) => {
@@ -255,128 +240,116 @@ app.get("/api/health", (req, res) => {
 });
 
 app.get("/api/youtube/search", async (req, res) => {
+  const query = String(req.query.q || "").trim();
+  const limit = Math.min(Number(req.query.limit || 20), 20);
+
+  if (!query) {
+    return res.status(400).json({ error: "Missing search query" });
+  }
+
   try {
-    const query = String(req.query.q || "").trim();
+    const tracks = await searchYouTubeSafe(query, limit);
 
-    const limit = Math.min(
-      Number(req.query.limit || 20),
-      20
-    );
-
-    if (!query) {
-      return res
-        .status(400)
-        .json({ error: "Missing search query" });
+    if (tracks.length > 0) {
+      return res.json({
+        query,
+        mode: "yt_dlp_search",
+        tracks,
+      });
     }
 
-    const tracks = await searchYouTube(query, limit);
+    const fallback = await fetchHiddenTunesRss(limit);
 
-    res.json({
+    return res.json({
       query,
-      tracks,
+      mode: "rss_fallback",
+      tracks: fallback.tracks,
     });
   } catch (error) {
-    res.status(500).json({
-      error: "YouTube search failed",
-      details: error.message,
+    console.error("YouTube search fallback error:", error);
+
+    return res.json({
+      query,
+      mode: "safe_empty_fallback",
+      tracks: [],
     });
   }
 });
 
 app.get("/api/youtube/trending", async (req, res) => {
+  const limit = Math.min(Number(req.query.limit || 20), 20);
+
+  const query = String(
+    req.query.q || "trending afrobeat music amapiano afrobeats dancehall"
+  ).trim();
+
   try {
-    const limit = Math.min(
-      Number(req.query.limit || 20),
-      20
-    );
+    const tracks = await searchYouTubeSafe(query, limit);
 
-    const query = String(
-      req.query.q ||
-        "trending afrobeat music amapiano afrobeats dancehall"
-    ).trim();
+    if (tracks.length > 0) {
+      return res.json({
+        title: "Trending YouTube",
+        query,
+        mode: "yt_dlp_trending",
+        tracks,
+      });
+    }
 
-    const tracks = await searchYouTube(query, limit);
+    const fallback = await fetchHiddenTunesRss(limit);
 
-    res.json({
-      title: "Trending YouTube",
+    return res.json({
+      title: "Hidden Tunes Trending",
       query,
-      tracks,
+      mode: "rss_fallback",
+      tracks: fallback.tracks,
     });
   } catch (error) {
-    res.status(500).json({
-      error: "YouTube trending failed",
-      details: error.message,
+    console.error("YouTube trending fallback error:", error);
+
+    return res.json({
+      title: "Hidden Tunes Trending",
+      query,
+      mode: "safe_empty_fallback",
+      tracks: [],
     });
   }
 });
 
 app.get("/api/youtube/hidden-tunes", async (req, res) => {
   try {
-    const limit = Math.min(
-      Number(req.query.limit || 20),
-      20
-    );
-
+    const limit = Math.min(Number(req.query.limit || 20), 20);
     const catalog = await fetchHiddenTunesRss(limit);
 
-    res.json({
+    return res.json({
       title: "Hidden Tunes Catalog",
+      mode: catalog.mode,
       tracks: catalog.tracks,
     });
   } catch (error) {
-    res.status(500).json({
-      error: "Hidden Tunes catalog failed",
-      details: error.message,
+    console.error("Hidden Tunes RSS failed:", error);
+
+    return res.json({
+      title: "Hidden Tunes Catalog",
+      mode: "safe_empty_fallback",
+      tracks: [],
     });
   }
 });
 
-async function getM4aUrl(videoId) {
-  const safeVideoId = extractYouTubeId(videoId);
-
-  if (!safeVideoId) {
-    throw new Error(
-      "Missing or invalid YouTube video ID"
-    );
-  }
-
-  if (streamCache.has(safeVideoId)) {
-    return streamCache.get(safeVideoId);
-  }
-
-  const videoUrl = `https://www.youtube.com/watch?v=${safeVideoId}`;
-
-  const rawUrl = await ytdlp(videoUrl, {
-    getUrl: true,
-    noWarnings: true,
-    noPlaylist: true,
-    format: "140/bestaudio[ext=m4a]/bestaudio",
-  });
-
-  const streamUrl = String(rawUrl || "")
-    .split("\n")[0]
-    .trim();
-
-  streamCache.set(safeVideoId, streamUrl);
-
-  return streamUrl;
-}
-
 app.get("/api/youtube/audio/:videoId", async (req, res) => {
   try {
-    const safeVideoId = extractYouTubeId(
-      req.params.videoId
-    );
-
+    const safeVideoId = extractYouTubeId(req.params.videoId);
     const streamUrl = await getM4aUrl(safeVideoId);
 
-    res.json({
+    return res.json({
       videoId: safeVideoId,
       streamUrl,
       format: "m4a",
     });
   } catch (error) {
-    res.status(500).json({
+    console.error("YouTube audio failed:", error);
+
+    return res.status(500).json({
       error: "Failed to get YouTube m4a audio",
       details: error.message,
     });
@@ -385,19 +358,18 @@ app.get("/api/youtube/audio/:videoId", async (req, res) => {
 
 app.get("/api/youtube/stream/:videoId", async (req, res) => {
   try {
-    const safeVideoId = extractYouTubeId(
-      req.params.videoId
-    );
-
+    const safeVideoId = extractYouTubeId(req.params.videoId);
     const streamUrl = await getM4aUrl(safeVideoId);
 
-    res.json({
+    return res.json({
       videoId: safeVideoId,
       streamUrl,
       format: "m4a",
     });
   } catch (error) {
-    res.status(500).json({
+    console.error("YouTube stream failed:", error);
+
+    return res.status(500).json({
       error: "Failed to get YouTube m4a stream",
       details: error.message,
     });
