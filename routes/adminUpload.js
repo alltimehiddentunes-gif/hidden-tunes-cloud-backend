@@ -1,9 +1,9 @@
-const express = require("express");
-const multer = require("multer");
-const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
-const { createClient } = require("@supabase/supabase-js");
-const { v4: uuidv4 } = require("uuid");
-const mm = require("music-metadata");
+import express from "express";
+import multer from "multer";
+import crypto from "crypto";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { createClient } from "@supabase/supabase-js";
+import { parseBuffer } from "music-metadata";
 
 const router = express.Router();
 
@@ -27,6 +27,14 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+
+function slugify(value) {
+  return String(value || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
 
 async function uploadToR2({ key, body, contentType }) {
   await r2.send(
@@ -55,10 +63,12 @@ router.post(
       const lyricsFile = req.files?.lyrics?.[0];
 
       if (!songFile) {
-        return res.status(400).json({ error: "MP3 song file is required." });
+        return res.status(400).json({
+          error: "MP3 song file is required.",
+        });
       }
 
-      const id = uuidv4();
+      const id = crypto.randomUUID();
 
       const title =
         req.body.title ||
@@ -69,19 +79,21 @@ router.post(
       const album = req.body.album || "Singles";
       const genre = req.body.genre || "Afrobeat";
       const mood = req.body.mood || "Premium";
-      const releaseYear = req.body.releaseYear || new Date().getFullYear();
+      const releaseYear = Number(
+        req.body.releaseYear || new Date().getFullYear()
+      );
 
       let duration = Number(req.body.duration || 0);
 
       try {
-        const metadata = await mm.parseBuffer(songFile.buffer, songFile.mimetype);
+        const metadata = await parseBuffer(songFile.buffer, songFile.mimetype);
         duration = Math.round(metadata.format.duration || duration || 0);
       } catch {
         duration = duration || 0;
       }
 
-      const safeArtist = artist.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-      const safeTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      const safeArtist = slugify(artist) || "unknown-artist";
+      const safeTitle = slugify(title) || "untitled-song";
 
       const songKey = `songs/${safeArtist}/${id}-${safeTitle}.mp3`;
 
@@ -110,7 +122,7 @@ router.post(
       if (lyricsFile) {
         const rawLyrics = lyricsFile.buffer.toString("utf8");
 
-        if (lyricsFile.originalname.endsWith(".lrc")) {
+        if (lyricsFile.originalname.toLowerCase().endsWith(".lrc")) {
           syncedLyrics = rawLyrics;
         } else {
           lyricsText = rawLyrics;
@@ -120,11 +132,14 @@ router.post(
       let artistId = null;
       let albumId = null;
 
-      const { data: existingArtist } = await supabase
-        .from("artists")
-        .select("*")
-        .eq("name", artist)
-        .maybeSingle();
+      const { data: existingArtist, error: existingArtistError } =
+        await supabase
+          .from("artists")
+          .select("*")
+          .eq("name", artist)
+          .maybeSingle();
+
+      if (existingArtistError) throw existingArtistError;
 
       if (existingArtist) {
         artistId = existingArtist.id;
@@ -142,12 +157,14 @@ router.post(
         artistId = newArtist.id;
       }
 
-      const { data: existingAlbum } = await supabase
+      const { data: existingAlbum, error: existingAlbumError } = await supabase
         .from("albums")
         .select("*")
         .eq("title", album)
         .eq("artist_id", artistId)
         .maybeSingle();
+
+      if (existingAlbumError) throw existingAlbumError;
 
       if (existingAlbum) {
         albumId = existingAlbum.id;
@@ -179,8 +196,8 @@ router.post(
           genre,
           mood,
           duration,
-          url: songUrl,
-          artwork: artworkUrl,
+          audio_url: songUrl,
+          artwork_url: artworkUrl,
           source_name: "Hidden Tunes",
           type: "r2",
           is_online: true,
@@ -199,6 +216,7 @@ router.post(
       });
     } catch (error) {
       console.error("Admin upload error:", error);
+
       return res.status(500).json({
         error: "Upload failed",
         details: error.message,
@@ -207,4 +225,4 @@ router.post(
   }
 );
 
-module.exports = router;
+export default router;
