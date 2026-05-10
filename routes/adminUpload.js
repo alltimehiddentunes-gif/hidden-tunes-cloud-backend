@@ -36,6 +36,11 @@ function slugify(value) {
     .replace(/^-+|-+$/g, "");
 }
 
+function makeUniqueSlug(base, id) {
+  const safeBase = slugify(base) || "hidden-tunes";
+  return `${safeBase}-${String(id).slice(0, 8)}`;
+}
+
 async function uploadToR2({ key, body, contentType }) {
   await r2.send(
     new PutObjectCommand({
@@ -83,6 +88,9 @@ router.post(
         req.body.releaseYear || new Date().getFullYear()
       );
 
+      const artistSlug = slugify(artist) || "unknown-artist";
+      const albumSlug = makeUniqueSlug(`${artist}-${album}`, id);
+
       let duration = Number(req.body.duration || 0);
 
       try {
@@ -92,7 +100,7 @@ router.post(
         duration = duration || 0;
       }
 
-      const safeArtist = slugify(artist) || "unknown-artist";
+      const safeArtist = artistSlug;
       const safeTitle = slugify(title) || "untitled-song";
 
       const songKey = `songs/${safeArtist}/${id}-${safeTitle}.mp3`;
@@ -148,6 +156,7 @@ router.post(
           .from("artists")
           .insert({
             name: artist,
+            slug: artistSlug,
             image_url: artworkUrl,
           })
           .select()
@@ -173,6 +182,7 @@ router.post(
           .from("albums")
           .insert({
             title: album,
+            slug: albumSlug,
             artist_id: artistId,
             artwork_url: artworkUrl,
             release_year: releaseYear,
