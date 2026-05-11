@@ -54,6 +54,91 @@ async function uploadToR2({ key, body, contentType }) {
   return `${process.env.R2_PUBLIC_URL}/${key}`;
 }
 
+async function findOrCreateArtist({ artist, artistSlug, artworkUrl }) {
+  const { data: existingArtists, error: findError } = await supabase
+    .from("artists")
+    .select("*")
+    .or(`name.eq.${artist},slug.eq.${artistSlug}`)
+    .order("created_at", { ascending: true })
+    .limit(1);
+
+  if (findError) throw findError;
+
+  if (Array.isArray(existingArtists) && existingArtists.length > 0) {
+    const existingArtist = existingArtists[0];
+
+    if (!existingArtist.image_url && artworkUrl) {
+      await supabase
+        .from("artists")
+        .update({ image_url: artworkUrl })
+        .eq("id", existingArtist.id);
+    }
+
+    return existingArtist;
+  }
+
+  const { data: newArtists, error: artistError } = await supabase
+    .from("artists")
+    .insert({
+      name: artist,
+      slug: artistSlug,
+      image_url: artworkUrl,
+    })
+    .select()
+    .limit(1);
+
+  if (artistError) throw artistError;
+
+  return newArtists?.[0];
+}
+
+async function findOrCreateAlbum({
+  album,
+  albumSlug,
+  artistId,
+  artworkUrl,
+  releaseYear,
+}) {
+  const { data: existingAlbums, error: findError } = await supabase
+    .from("albums")
+    .select("*")
+    .eq("title", album)
+    .eq("artist_id", artistId)
+    .order("created_at", { ascending: true })
+    .limit(1);
+
+  if (findError) throw findError;
+
+  if (Array.isArray(existingAlbums) && existingAlbums.length > 0) {
+    const existingAlbum = existingAlbums[0];
+
+    if (!existingAlbum.artwork_url && artworkUrl) {
+      await supabase
+        .from("albums")
+        .update({ artwork_url: artworkUrl })
+        .eq("id", existingAlbum.id);
+    }
+
+    return existingAlbum;
+  }
+
+  const { data: newAlbums, error: albumError } = await supabase
+    .from("albums")
+    .insert({
+      title: album,
+      slug: albumSlug,
+      artist_id: artistId,
+      artwork_url: artworkUrl,
+      release_year: releaseYear,
+    })
+    .select()
+    .limit(1);
+
+  if (albumError) throw albumError;
+
+  return newAlbums?.[0];
+}
+
 router.post(
   "/song",
   upload.fields([
@@ -75,15 +160,17 @@ router.post(
 
       const id = crypto.randomUUID();
 
-      const title =
+      const title = String(
         req.body.title ||
-        songFile.originalname.replace(/\.[^/.]+$/, "") ||
-        "Untitled Song";
+          songFile.originalname.replace(/\.[^/.]+$/, "") ||
+          "Untitled Song"
+      ).trim();
 
-      const artist = req.body.artist || "Unknown Artist";
-      const album = req.body.album || "Singles";
-      const genre = req.body.genre || "Afrobeat";
-      const mood = req.body.mood || "Premium";
+      const artist = String(req.body.artist || "Unknown Artist").trim();
+      const album = String(req.body.album || "Singles").trim();
+      const genre = String(req.body.genre || "Afrobeat").trim();
+      const mood = String(req.body.mood || "Premium").trim();
+
       const releaseYear = Number(
         req.body.releaseYear || new Date().getFullYear()
       );
@@ -104,7 +191,8 @@ router.post(
       const safeArtist = artistSlug;
       const safeTitle = slugify(title) || "untitled-song";
 
-      const songKey = `songs/${safeArtist}/${id}-${safeTitle}.mp3`;
+      const songExt = songFile.originalname.split(".").pop() || "mp3";
+      const songKey = `songs/${safeArtist}/${id}-${safeTitle}.${songExt}`;
 
       const songUrl = await uploadToR2({
         key: songKey,
@@ -138,73 +226,38 @@ router.post(
         }
       }
 
-      let artistId = null;
-      let albumId = null;
+      const artistRecord = await findOrCreateArtist({
+        artist,
+        artistSlug,
+        artworkUrl,
+      });
 
-      const { data: existingArtist, error: existingArtistError } =
-        await supabase
-          .from("artists")
-          .select("*")
-          .eq("name", artist)
-          .maybeSingle();
-
-      if (existingArtistError) throw existingArtistError;
-
-      if (existingArtist) {
-        artistId = existingArtist.id;
-      } else {
-        const { data: newArtist, error: artistError } = await supabase
-          .from("artists")
-          .insert({
-            name: artist,
-            slug: artistSlug,
-            image_url: artworkUrl,
-          })
-          .select()
-          .single();
-
-        if (artistError) throw artistError;
-        artistId = newArtist.id;
+      if (!artistRecord?.id) {
+        throw new Error("Could not create or find artist.");
       }
 
-      const { data: existingAlbum, error: existingAlbumError } = await supabase
-        .from("albums")
-        .select("*")
-        .eq("title", album)
-        .eq("artist_id", artistId)
-        .maybeSingle();
+      const albumRecord = await findOrCreateAlbum({
+        album,
+        albumSlug,
+        artistId: artistRecord.id,
+        artworkUrl,
+        releaseYear,
+      });
 
-      if (existingAlbumError) throw existingAlbumError;
-
-      if (existingAlbum) {
-        albumId = existingAlbum.id;
-      } else {
-        const { data: newAlbum, error: albumError } = await supabase
-          .from("albums")
-          .insert({
-            title: album,
-            slug: albumSlug,
-            artist_id: artistId,
-            artwork_url: artworkUrl,
-            release_year: releaseYear,
-          })
-          .select()
-          .single();
-
-        if (albumError) throw albumError;
-        albumId = newAlbum.id;
+      if (!albumRecord?.id) {
+        throw new Error("Could not create or find album.");
       }
 
-      const { data: song, error: songError } = await supabase
+      const { data: insertedSongs, error: songError } = await supabase
         .from("songs")
         .insert({
           id,
           slug: songSlug,
           title,
           artist,
-          artist_id: artistId,
+          artist_id: artistRecord.id,
           album,
-          album_id: albumId,
+          album_id: albumRecord.id,
           genre,
           mood,
           duration,
@@ -215,12 +268,20 @@ router.post(
           is_online: true,
           lyrics: lyricsText,
           synced_lyrics: syncedLyrics,
-          release_year: releaseYear,
+          release_year: Number.isFinite(releaseYear)
+            ? releaseYear
+            : new Date().getFullYear(),
         })
         .select()
-        .single();
+        .limit(1);
 
       if (songError) throw songError;
+
+      const song = insertedSongs?.[0];
+
+      if (!song) {
+        throw new Error("Song uploaded but database row was not returned.");
+      }
 
       return res.json({
         success: true,
